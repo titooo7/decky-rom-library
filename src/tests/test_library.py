@@ -153,6 +153,28 @@ class LibraryTest(unittest.TestCase):
         self.assertIsNone(self.lib.choice(game, "portrait"))
         self.assertEqual([g["name"] for g in self.lib.games("psx")], [])
 
+    def test_games_on_a_card_are_listed_and_deleted_there(self):
+        card = os.path.join(self.h.root, "run/media/steamos/SDCard/Emulation/roms")
+        touch(os.path.join(card, "psp/Patapon (Europe).iso"), "x" * 500)
+        touch(os.path.join(card, "gba/Metroid Fusion (Europe).gba"), "x")
+        self.addCleanup(setattr, esde, "CARD_ROM_DIRS", esde.CARD_ROM_DIRS)
+        esde.CARD_ROM_DIRS = (os.path.join(self.h.root, "run/media/*/*/Emulation/roms"),)
+        systems = self.lib.systems()
+        # A system the card alone has appears, and a system both have lists both folders.
+        self.assertEqual(systems["gba"]["roots"], [card + "/gba"])
+        self.assertEqual(systems["psp"]["roots"], [self.h.rom("psp"), card + "/psp"])
+        self.assertEqual(sorted(g["name"] for g in self.lib.games("psp")), ["LittleBigPlanet", "Patapon"])
+        self.assertEqual([g["name"] for g in self.lib.games("gba")], ["Metroid Fusion"])
+        game = card + "/psp/Patapon (Europe).iso"
+        self.assertEqual(self.lib.system_of(game, systems), "psp")
+        self.assertEqual(self.lib.files("psp", game), {"files": ["Patapon (Europe).iso"], "size": 500})
+        first = self.lib.stamp("psp")
+        touch(os.path.join(card, "psp/Sub/Other.iso"))
+        self.assertNotEqual(self.lib.stamp("psp"), first)
+        self.lib.uninstall("psp", game)
+        self.assertFalse(os.path.exists(game))
+        self.assertEqual([g["name"] for g in self.lib.games("psp")], ["LittleBigPlanet", "Other"])
+
     def test_system_list_names_emulator_and_extensions(self):
         systems = {s["id"]: s for s in self.lib.system_list()}
         self.assertEqual(systems["switch"]["emulator"], self.lib.esde.label(self.lib.systems()["switch"]["esde"]))

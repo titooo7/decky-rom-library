@@ -108,6 +108,49 @@ class ParseTest(unittest.TestCase):
         os.makedirs(self.h.roms)
         self.assertEqual(self.h.es.rom_dir(), self.h.home + "/ROMs/")
 
+    def with_card(self, *games):
+        """Make a card's ROM folder with games and return it, with the plugin searching for cards there."""
+        card = os.path.join(self.h.root, "run/media/steamos/MicroSD/Emulation/roms")
+        for rel in games:
+            touch(os.path.join(card, rel))
+        self.addCleanup(setattr, esde, "CARD_ROM_DIRS", esde.CARD_ROM_DIRS)
+        esde.CARD_ROM_DIRS = (os.path.join(self.h.root, "run/media/*/*/Emulation/roms"),)
+        return card
+
+    def test_cards_add_their_rom_folders(self):
+        card = self.with_card("fbneo/pacman.zip", "psp/Other (Europe).iso")
+        self.assertEqual(self.h.es.rom_dirs(), [self.h.home + "/ROMs/", card + "/"])
+        # ES-DE's setting stays the first, where new games go.
+        self.assertEqual(self.h.es.rom_dir(), self.h.home + "/ROMs/")
+        fbneo = self.h.es.systems()["fbneo"]
+        self.assertEqual(self.h.es.system_dirs(fbneo), [self.h.roms + "/fbneo", card + "/fbneo"])
+        found = self.h.es.scan(fbneo)
+        self.assertIn(self.h.rom("fbneo/marble.zip"), found)
+        self.assertIn(card + "/fbneo/pacman.zip", found)
+        self.assertEqual(self.h.es.media_name(fbneo, card + "/fbneo/pacman.zip"), "pacman")
+
+    def test_a_card_alone_holds_the_games(self):
+        shutil.rmtree(self.h.roms)
+        card = self.with_card("psp/Other (Europe).iso")
+        psp = self.h.es.systems()["psp"]
+        self.assertEqual(self.h.es.system_dirs(psp), [card + "/psp"])
+        self.assertEqual(self.h.es.scan(psp), [card + "/psp/Other (Europe).iso"])
+
+    def test_a_card_folder_that_is_a_link_counts_once(self):
+        card = self.with_card()
+        os.makedirs(os.path.dirname(card))
+        os.symlink(self.h.roms, card)
+        self.assertEqual(self.h.es.rom_dirs(), [self.h.home + "/ROMs/"])
+        fbneo = self.h.es.systems()["fbneo"]
+        self.assertEqual(self.h.es.scan(fbneo).count(self.h.rom("fbneo/marble.zip")), 1)
+
+    def test_launch_gives_the_rom_directory_of_the_game(self):
+        card = self.with_card("fbneo/pacman.zip")
+        fbneo = self.h.es.systems()["fbneo"]
+        fbneo = {**fbneo, "commands": [("t", "%EMULATOR_RETROARCH% -rompath %ROMPATH% %ROM%")]}
+        got = self.h.es.launch(fbneo, card + "/fbneo/pacman.zip", "t")
+        self.assertEqual(got["args"], f"-rompath {card}/ {card}/fbneo/pacman.zip")
+
     def native(self, machine):
         sh = os.path.join(self.h.root, "sh")
         with open(sh, "wb") as f:

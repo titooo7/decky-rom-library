@@ -136,7 +136,8 @@ class Library:
             found = {}
         for sid, s in sorted(found.items(), key=lambda kv: kv[1]["fullname"].lower()):
             extras = self.extras(sid, user)
-            root = self.esde.system_dir(s)
+            roots = self.esde.system_dirs(s)
+            root = roots[0]
             if "exe" in extras or not os.path.isdir(root):
                 continue
             out[sid] = {
@@ -145,7 +146,10 @@ class Library:
                 "extras": extras,
                 "name": extras.get("name") or s["fullname"],
                 "collection": extras.get("collection") or s["fullname"],
+                # The folder new games go to, and every folder that holds games, such as the
+                # system's folder on an SD card.
                 "root": root,
+                "roots": roots,
             }
         # A system with "exe" in systems.json runs that command and ignores ES-DE's.
         for sid in sorted({*self.defaults.get("systems", {}), *user}):
@@ -158,8 +162,14 @@ class Library:
                     "name": extras.get("name", sid),
                     "collection": extras.get("collection"),
                     "root": os.path.normpath(self.expand(extras["roms"])),
+                    "roots": [os.path.normpath(self.expand(extras["roms"]))],
                 }
         return out
+
+    @staticmethod
+    def root_of(system, path):
+        """Return the folder of a system's games that holds a game, else the first one."""
+        return next((r for r in system["roots"] if path.startswith(r + "/")), system["root"])
 
     def unavailable(self, system):
         """Return why a system's games cannot start, or None."""
@@ -332,7 +342,7 @@ class Library:
         return moves[0][1]
 
     def system_of(self, path, systems):
-        return next((sid for sid, s in systems.items() if path.startswith(s["root"] + "/")), None)
+        return next((sid for sid, s in systems.items() if any(path.startswith(r + "/") for r in s["roots"])), None)
 
     # Games
 
@@ -360,11 +370,12 @@ class Library:
         """Return a value that changes when a game comes into or leaves a system's ROM folder: the
         number of its folders and their latest modification time."""
         times = []
-        for folder, _, _ in os.walk(self.systems()[sid]["root"]):
-            try:
-                times.append(os.stat(folder).st_mtime_ns)
-            except OSError:
-                pass
+        for root in self.systems()[sid]["roots"]:
+            for folder, _, _ in os.walk(root):
+                try:
+                    times.append(os.stat(folder).st_mtime_ns)
+                except OSError:
+                    pass
         return f"{len(times)}:{max(times, default=0)}"
 
     def metadata(self, system):
@@ -435,7 +446,7 @@ class Library:
 
     def rom_files(self, system, path):
         """Return a game's file or folder, then the files its .cue, .gdi or .m3u names in the system's folder."""
-        root = os.path.realpath(system["root"])
+        root = os.path.realpath(self.root_of(system, path))
         found, todo = [], [path]
         while todo:
             p = os.path.normpath(todo.pop(0))
@@ -451,7 +462,8 @@ class Library:
         """Return a game's files relative to its system's folder, and their size in bytes."""
         system = self.systems()[sid]
         found = self.rom_files(system, self.game(sid, path)["path"])
-        return {"files": [os.path.relpath(p, system["root"]) for p in found], "size": disk_size(found)}
+        root = self.root_of(system, path)
+        return {"files": [os.path.relpath(p, root) for p in found], "size": disk_size(found)}
 
     def uninstall(self, sid, path):
         """Delete a game's files and forget the images picked for its tile."""
@@ -721,7 +733,7 @@ class Library:
         game = self.game(sid, path, systems)
         own = dict(self.decoded.facts(sid, game["path"]))
         if sid == "switch" and own.get("serial") and own.get("version"):
-            update = info.switch_update(system["root"], own["serial"])
+            update = info.switch_update(self.root_of(system, game["path"]), own["serial"])
             version = update and self.decoded.facts(sid, update).get("version")
             if version and version != own["version"]:
                 own["version"] = f"{own['version']}, update {version}"

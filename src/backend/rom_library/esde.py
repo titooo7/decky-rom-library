@@ -29,6 +29,10 @@ NATIVE_BINARY = "/bin/sh"
 # The ROM folders without ES-DE's setting, first found first: ES-DE's default, then the one of
 # Loadout and EmuDeck. A new device gets the last.
 ROM_DIRS = ("~/ROMs", "~/Emulation/roms")
+# The ROM folders of mounted SD cards and drives, searched in addition to the one above: SteamOS
+# mounts a card at /run/media/<user>/<label>, such as /run/media/steamos/MicroSD, and older
+# versions at /run/media/<device>, such as /run/media/mmcblk0p1.
+CARD_ROM_DIRS = ("/run/media/*/*/Emulation/roms", "/run/media/*/Emulation/roms")
 # Directories a desktop session puts on PATH, for the systempath rules.
 SESSION_PATH = (
     "~/.local/bin", "~/bin", "/usr/local/bin", "/usr/bin", "/bin",
@@ -284,6 +288,19 @@ class EsDe:
         value = self.expand(value)
         return value if value.endswith("/") else value + "/"
 
+    def rom_dirs(self):
+        """Return every ROM directory with a trailing slash: rom_dir() first, then the ROM folder of
+        each mounted card. A folder that is another one's symlink, as EmuDeck makes of ~/Emulation
+        when it keeps the games on the card, counts once."""
+        found, real = [self.rom_dir()], set()
+        real.add(os.path.realpath(found[0]))
+        for pattern in CARD_ROM_DIRS:
+            for folder in sorted(glob.glob(pattern)):
+                if os.path.isdir(folder) and os.path.realpath(folder) not in real:
+                    real.add(os.path.realpath(folder))
+                    found.append(folder + "/")
+        return found
+
     def media_dir(self):
         value = self.setting("MediaDirectory")
         return self.expand(value) if value else os.path.join(self.esde_home, "downloaded_media")
@@ -365,9 +382,31 @@ class EsDe:
                 cores.setdefault(name, paths)
         return emulators, cores
 
+    def system_dirs(self, system):
+        """Return the folders of a system's games, one in each ROM directory that has it, or the
+        first ROM directory's when none does."""
+        dirs = [os.path.normpath(self.expand(system["path"].replace("%ROMPATH%", root).replace("//", "/")))
+                for root in self.rom_dirs()]
+        found, real = [], set()
+        for folder in dirs:
+            if os.path.isdir(folder) and os.path.realpath(folder) not in real:
+                real.add(os.path.realpath(folder))
+                found.append(folder)
+        return found or dirs[:1]
+
     def system_dir(self, system):
-        path = system["path"].replace("%ROMPATH%", self.rom_dir()).replace("//", "/")
-        return os.path.normpath(self.expand(path))
+        """Return the first folder of a system's games."""
+        return self.system_dirs(system)[0]
+
+    def system_dir_of(self, system, path):
+        """Return the folder of a system's games that holds a game, else the first one."""
+        folders = self.system_dirs(system)
+        return next((f for f in folders if path.startswith(f + "/")), folders[0])
+
+    def rom_dir_of(self, path):
+        """Return the ROM directory that holds a game, else rom_dir()."""
+        dirs = self.rom_dirs()
+        return next((d for d in dirs if path.startswith(d)), dirs[0])
 
     def gamelist(self, system):
         """Return (system alternative emulator, {absolute path: metadata})."""
@@ -376,16 +415,15 @@ class EsDe:
         if not parsed:
             return None, {}
         alternative, games = parsed
-        root = self.system_dir(system)
+        roots = self.system_dirs(system)
         out = {}
         for written, meta in games.items():
             if written.startswith("./"):
-                full = root + written[1:]
+                # A path relative to the system's folder can name a game in any of its folders.
+                for root in roots:
+                    out.setdefault(os.path.normpath(root + written[1:]), meta)
             elif written.startswith("/"):
-                full = written
-            else:
-                continue
-            out[os.path.normpath(full)] = meta
+                out[os.path.normpath(written)] = meta
         return alternative, out
 
     def collections(self):
@@ -396,21 +434,21 @@ class EsDe:
             names = sorted(os.listdir(folder))
         except OSError:
             return out
-        rom_dir = self.rom_dir()
+        rom_dirs = self.rom_dirs()
         for f in names:
             if not (f.startswith("custom-") and f.endswith(".cfg")) or f == "custom-.cfg":
                 continue
             lines = self.parsed.get(os.path.join(folder, f), parse_lines) or []
-            out[f[7:-4]] = {os.path.normpath(line.replace("%ROMPATH%", rom_dir)) for line in lines}
+            out[f[7:-4]] = {os.path.normpath(line.replace("%ROMPATH%", rom_dir))
+                            for line in lines for rom_dir in rom_dirs}
         return out
 
     # Games
 
     def scan(self, system):
         """Return the game paths of a system the way ES-DE's populateFolder() finds them."""
-        root = self.system_dir(system)
-        if not os.path.isdir(root) or os.path.exists(os.path.join(root, "noload.txt")):
-            return []
+        roots = [r for r in self.system_dirs(system)
+                 if os.path.isdir(r) and not os.path.exists(os.path.join(r, "noload.txt"))]
         extensions = set(system["extensions"])
         show_hidden = self.setting("ShowHiddenFiles", "true") == "true"
         found, seen = [], set()
@@ -434,12 +472,14 @@ class EsDe:
                 elif is_dir and not os.path.exists(os.path.join(entry.path, "noload.txt")):
                     walk(entry.path, depth + 1)
 
-        walk(root, 0)
+        # The folders share seen, so a folder that is another's symlink or inside it lists once.
+        for root in roots:
+            walk(root, 0)
         return found
 
     def media_name(self, system, path):
         """Return a game's media file name without extension, under its kind's folder."""
-        sub = os.path.relpath(os.path.dirname(path), self.system_dir(system))
+        sub = os.path.relpath(os.path.dirname(path), self.system_dir_of(system, path))
         return stem(path) if sub == "." else os.path.join(sub, stem(path))
 
     # Launch commands
@@ -640,7 +680,7 @@ class EsDe:
                    .replace("%FILENAME%", file_name)
                    .replace("%ROMRAW%", rom_raw)
                    .replace("%ROMRAWWIN%", rom_raw.replace("/", "\\"))
-                   .replace("%ROMPATH%", escape(self.rom_dir()))
+                   .replace("%ROMPATH%", escape(self.rom_dir_of(rom_raw)))
                    .replace("%ESPATH%", os.path.dirname(self.binary() or ""))
                    .replace("%EMUDIR%", escape(emu_dir))
                    .replace("%GAMEDIRRAW%", os.path.dirname(rom_file))

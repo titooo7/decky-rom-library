@@ -27,6 +27,8 @@ ROM Library needs:
 - An emulator for each system, for example installed by Loadout.
 - The games in `~/Emulation/roms/<system>`, such as `~/Emulation/roms/switch`,
   with [ES-DE's system names](https://gitlab.com/es-de/emulationstation-de/-/blob/master/USERGUIDE.md#supported-game-systems).
+  Games on an SD card are found too, in `Emulation/roms/<system>` on the card, such as
+  `/run/media/steamos/MicroSD/Emulation/roms/switch`.
 
 1. In Decky's settings, open General and turn on Developer mode.
 2. Open Developer. Under Install Plugin from URL, enter the URL of Get it and
